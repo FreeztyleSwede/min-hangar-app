@@ -54,7 +54,7 @@ input[type=checkbox]{width:22px;min-height:22px;height:22px;accent-color:var(--a
 .post{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:.9rem 1rem}
 .panel .post{background:var(--bg)}
 .post h3{margin:0 0 .3rem;font-size:1.05rem;overflow-wrap:anywhere}
-.post dl{display:grid;grid-template-columns:auto 1fr;gap:.1rem .8rem;margin:.3rem 0;font-size:.93rem}
+.post dl{display:grid;grid-template-columns:minmax(0,42%) minmax(0,1fr);gap:.1rem .8rem;margin:.3rem 0;font-size:.93rem}
 .post dt{color:var(--muted)}.post dd{margin:0;overflow-wrap:anywhere}
 .anteckning{white-space:pre-wrap;overflow-wrap:anywhere;margin:.4rem 0}
 .knappar{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem}
@@ -80,4 +80,4 @@ legend{font-weight:600;padding:0 .3rem}
 .foot p{flex-basis:100%;margin:.3rem 0 0;font-size:.88rem}
 #toast{position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);background:#111;color:#fff;padding:.7rem 1rem;border-radius:10px;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw;z-index:20}
 #toast.visa{opacity:1}
-@media (max-width:560px){.brand img{height:40px}.brandtext{font-size:.95rem}.huvudmeny{width:100%}.huvudmeny .yt span{display:none}.falt2{grid-template-columns:1fr}.historik .ny{grid-template-columns:1fr 1fr}.historik .ny .btn{grid-column:1/-1}.grid{grid-template-columns:1fr}}
+@media (max-width:560px){.post dl{grid-template-columns:minmax(0,1fr);gap:0}.post dd{margin-bottom:.35rem}.post dt{font-size:.85rem}.brand img{height:40px}.brandtext{font-size:.95rem}.huvudmeny{width:100%}.huvudmeny .yt span{display:none}.falt2{grid-template-columns:1fr}.historik .ny{grid-template-columns:1fr 1fr}.historik .ny .btn{grid-column:1/-1}.grid{grid-template-columns:1fr}}

@@ -1,6 +1,6 @@
 'use strict';
 (function(){
-const APP='min-hangar', VERSION=2;
+const APP='min-hangar', VERSION=2, APPVER='3';
 // ---------- Fältdefinitioner (följer originalets lib/equipment-categories.ts, lib/aircraft-fields.ts och formulärkomponenterna) ----------
 const AIRCRAFT_TYPES=['3D-flygplan','Segelflygplan','Skala','Warbird','Trainer','Jet','Övrigt'];
 const PROPULSION=['El','Bränsle','Turbin','Övrigt'];
@@ -50,12 +50,26 @@ let poster=[], filter='';
 
 // ---------- IndexedDB ----------
 let dbp;
-function db(){ return dbp||(dbp=new Promise((res,rej)=>{ const r=indexedDB.open('min-hangar',1);
-  r.onupgradeneeded=()=>{ const s=r.result.createObjectStore('poster',{keyPath:'id'}); s.createIndex('kat','kat'); };
-  r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); })); }
+let migreringsInfo=null;
+function arV1(rec){ return !!rec&&typeof rec==='object'&&(rec.kat==='manualer'||('namn' in rec)||(!!TYPER[rec.kat]&&!('modell' in rec)&&!('titel' in rec)&&!('version' in rec))); }
+function db(){ return dbp||(dbp=new Promise((res,rej)=>{ const r=indexedDB.open('min-hangar',2);
+  r.onupgradeneeded=e=>{ const d=r.result, t=r.transaction; let s;
+    if(e.oldVersion<1){ s=d.createObjectStore('poster',{keyPath:'id'}); s.createIndex('kat','kat'); } else s=t.objectStore('poster');
+    if(!d.objectStoreNames.contains('sakerhetskopia')) d.createObjectStore('sakerhetskopia',{keyPath:'nyckel'});
+    if(e.oldVersion>=1){ // Version 1 → 2: migrera i samma uppgraderingstransaktion. Kastas ett fel avbryts allt och inget går förlorat.
+      const g=s.getAll(); g.onsuccess=()=>{ try{
+        const alla=g.result; const v1=alla.filter(arV1); if(!v1.length) return;
+        t.objectStore('sakerhetskopia').put({nyckel:'fore-v2-'+new Date().toISOString(),skapad:new Date().toISOString(),poster:alla});
+        const upptagna=new Set(alla.filter(x=>!arV1(x)).map(x=>x.id)); let flyttade=0;
+        for(const rec of v1){ const m=migreraV1(rec,upptagna); if(m.post.id!==rec.id) s.delete(rec.id); upptagna.add(m.post.id); s.put(m.post); flyttade+=m.flyttade; }
+        migreringsInfo={antal:v1.length,flyttade};
+      }catch(err){ console.warn('Migreringen avbröts',err); t.abort(); } }; } };
+  r.onblocked=()=>toast('Min Hangar är öppen i en annan flik med en äldre version. Stäng den flikarna för att slutföra uppgraderingen.');
+  r.onsuccess=()=>{ const d=r.result; d.onversionchange=()=>{ d.close(); toast('En nyare version av Min Hangar öppnades i en annan flik. Ladda om sidan.'); }; res(d); };
+  r.onerror=()=>rej(r.error); })); }
 async function tx(fn){ const d=await db(); return new Promise((res,rej)=>{ const t=d.transaction('poster','readwrite'); fn(t.objectStore('poster')); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error||new Error('Transaktionen avbröts.')); }); }
 async function ladda(){ const d=await db(); poster=await new Promise((res,rej)=>{ const r=d.transaction('poster').objectStore('poster').getAll(); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });
-  poster.sort((a,b)=>rubrik(a).localeCompare(rubrik(b),'sv')); }
+  poster=poster.filter(p=>p&&TYPER[p.kat]); poster.sort((a,b)=>rubrik(a).localeCompare(rubrik(b),'sv')); }
 const spara=p=>tx(s=>s.put(p));
 const tabort=id=>tx(s=>s.delete(id));
 
@@ -67,7 +81,7 @@ function rubrik(p){ if(p.kat==='dokument') return p.titel||''; if(p.kat==='firmw
   return [p.tillverkare,p.modell].filter(Boolean).join(' '); }
 const hitta=id=>poster.find(p=>p.id===id);
 function cykler(p){ return (Number(p.startcykler)||0)+(p.laddningar||[]).reduce((n,l)=>n+(Number(l.cykler)||0),0); }
-function sokText(p){ const k=KAT_FOR_TYP[p.kat]; return [rubrik(p),k&&k.name,k&&k.description,TYPER[p.kat].namn,...TYPER[p.kat].falt.map(f=>f[2]==='ref'?(hitta(p[f[0]])?rubrik(hitta(p[f[0]])):''):f[2]==='bool'?(p[f[0]]?f[1]:''):p[f[0]])].join(' ').toLocaleLowerCase('sv'); }
+function sokText(p){ if(!TYPER[p.kat]) return ''; const k=KAT_FOR_TYP[p.kat]; return [rubrik(p),k&&k.name,k&&k.description,TYPER[p.kat].namn,...TYPER[p.kat].falt.map(f=>f[2]==='ref'?(hitta(p[f[0]])?rubrik(hitta(p[f[0]])):''):f[2]==='bool'?(p[f[0]]?f[1]:''):p[f[0]])].join(' ').toLocaleLowerCase('sv'); }
 function matchar(p,q){ if(!q) return true; const t=sokText(p); return q.toLocaleLowerCase('sv').split(/\s+/).filter(Boolean).every(w=>t.includes(w)); }
 const antal=n=>n===1?'1 post':n+' poster';
 const fmtUnit=(f,v)=>esc(v);
@@ -86,6 +100,8 @@ function fraga({titel,text,knappar}){ return new Promise(res=>{
 function render(){
   const h=location.hash.replace(/^#\/?/,''); const [a,b,c]=h.split('/').map(decodeURIComponent);
   document.querySelectorAll('.huvudmeny a').forEach(x=>x.toggleAttribute('aria-current',false));
+  if(a==='kat'){ const ny=b==='flygmodeller'?'#/flygmodeller':b==='manualer'?'#/utrustning/manualer-firmware':KATMAP[b]?'#/utrustning/'+b:'#/';
+    history.replaceState(null,'',ny); return render(); }
   if(a==='utrustning'&&KATMAP[b]&&b!=='flygmodeller') return vyKategori(KATMAP[b]);
   if(a==='flygmodeller'){ if(!b) return vyFlyglista(); if(b==='ny') return vyFlygForm(null);
     const p=hitta(b); if(p&&p.kat==='flygmodeller') return c==='redigera'?vyFlygForm(p):vyFlygDetalj(p); return vyEjHittad(); }
@@ -203,7 +219,7 @@ function vyFlygForm(p){
   titel(p?'Redigera flygmodell':'Ny flygmodell'); setMeny('#/flygmodeller');
   vy().innerHTML=`<p><a class="tillbaka" href="${p?'#/flygmodeller/'+esc(p.id):'#/flygmodeller'}">← Tillbaka</a></p>
    <section class="panel"><h1 id="formRubrik">${p?'Redigera flygmodell':'Lägg till flygmodell'}</h1><form id="sidForm" class="postform" aria-labelledby="formRubrik" novalidate></form></section>`;
-  byggForm($('#sidForm'),'flygmodeller',p,async ny=>{ location.hash='#/flygmodeller/'+encodeURIComponent(ny.id); toast(p?'Flygmodellen är sparad.':'Flygmodellen är tillagd.'); },
+  byggForm($('#sidForm'),'flygmodeller',p,async ny=>{ history.replaceState(null,'','#/flygmodeller/'+encodeURIComponent(ny.id)); render(); fokusVy(); toast(p?'Flygmodellen är sparad.':'Flygmodellen är tillagd.'); },
     ()=>{ location.hash=p?'#/flygmodeller/'+encodeURIComponent(p.id):'#/flygmodeller'; });
   $('#sidForm [name=tillverkare]').focus(); vy()._upd=null;
 }
@@ -243,10 +259,13 @@ function byggForm(form,typ,p,efter,avbryt){
       if(!/^\d{4}-\d{2}-\d{2}$/.test(dt)||!(c>0&&c<=10000)) return toast('Ange datum och antal cykler (1–10000).'); hist.push({datum:dt,cykler:c}); hist.sort((a,b)=>a.datum.localeCompare(b.datum)); rita(); };
     form.querySelector('#histRader').onclick=e=>{ const i=e.target.closest('[data-hdel]'); if(i){ hist.splice(+i.dataset.hdel,1); rita(); } }; rita(); }
   form.querySelector('#avbrytKnapp').onclick=avbryt;
+  if(typ==='firmware'){ const a=form.querySelector('[name=produkt]'), b=form.querySelector('[name=radiosandare]');
+    a.addEventListener('change',()=>{ if(a.value) b.value=''; }); b.addEventListener('change',()=>{ if(b.value) a.value=''; }); }
   form.onsubmit=async e=>{ e.preventDefault(); const fd=new FormData(form);
     const ny={id:p?p.id:uid(),kat:typ,skapad:p?p.skapad:new Date().toISOString(),andrad:new Date().toISOString()};
     try{ for(const f of def.falt){ const raw=f[2]==='bool'?fd.has(f[0]):String(fd.get(f[0])??'').trim(); ny[f[0]]=normalisera(f,raw,true); }
-      if(def.historik) ny.laddningar=hist; }
+      if(def.historik) ny.laddningar=hist;
+      if(typ==='firmware'&&ny.produkt&&ny.radiosandare) throw new Error('Välj antingen produkt eller radiosändare, inte båda.'); }
     catch(err){ form.querySelector('#formFel').textContent=err.message; return; }
     await spara(ny); await ladda(); await efter(ny); };
 }
@@ -280,13 +299,43 @@ function exportera(){
   const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`min-hangar-${new Date().toISOString().slice(0,10)}.json`;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); toast(`Exporterade ${antal(poster.length)}.`);
 }
-function migreraV1(r){ // version 1 hade fältet "namn" och kategorin "manualer"
-  const m={...r}; if(m.kat==='manualer'){ m.kat='dokument'; m.titel=m.namn; m.url=m.lank; m.modell=m.avser; }
-  else { m.modell=m.namn; if(TYPER[m.kat]&&TYPER[m.kat].falt[0][0]==='tillverkare'&&!(typeof m.tillverkare==='string'&&m.tillverkare.trim())) m.tillverkare='Okänd tillverkare'; } if(m.anteckning) m[m.kat==='flygmodeller'||m.kat==='radiosandare'||m.kat==='dokument'?'anteckningar':'beskrivning']=m.anteckning;
-  if(m.kat==='flygmodeller'){ m.spannvidd_mm=m.spannvidd; m.flygvikt_g=m.vikt; }
-  if(m.kat==='batterier'){ m.kapacitet=m.mah; m.c_tal=m.c; m.inkopsdatum=m.inkopt; }
-  if(m.kat==='radiosandare') m.firmwareversion=m.firmware;
-  return m;
+// Version 1-fält → version 2. [målfält eller null, etikett]. Allt som inte kan mappas hamnar i anteckningen.
+const V1KARTA={
+ flygmodeller:{typ:['flygplanstyp','Typ'],spannvidd:['spannvidd_mm','Spännvidd (mm)'],vikt:['flygvikt_g','Vikt (g)'],status:[null,'Status']},
+ radiosandare:{protokoll:[null,'Protokoll'],firmware:['firmwareversion','Firmware'],kanaler:[null,'Kanaler']},
+ mottagare:{protokoll:['protokoll','Protokoll'],kanaler:['kanaler','Kanaler'],utgang:[null,'Utgång'],monterad:[null,'Monterad i']},
+ fartreglage:{strom:['max_strom_a','Ström (A)'],celler:['max_celler','Celler (S)'],bec:[null,'BEC'],firmware:[null,'Firmware'],monterad:[null,'Monterad i']},
+ servon:{storlek:[null,'Storlek'],vridmoment:['moment','Vridmoment (kg·cm)'],hastighet:['hastighet','Hastighet (s/60°)'],typ:[null,'Typ'],antal:[null,'Antal']},
+ batterier:{kemi:['kemi','Kemi'],celler:['celler','Celler (S)'],mah:['kapacitet','Kapacitet (mAh)'],c:['c_tal','C-tal'],kontakt:['kontakt','Kontakt'],startcykler:['startcykler','Cykler före registrering'],inkopt:['inkopsdatum','Inköpt']},
+ motorer:{storlek:[null,'Storlek'],kv:['kv','KV'],celler:['rek_spanning','Celler (S)'],monterad:[null,'Monterad i']},
+ propellrar:{storlek:['diameter','Diameter (tum)'],stigning:['stigning','Stigning (tum)'],blad:['blad','Antal blad'],material:['material','Material'],antal:[null,'Antal i lager']},
+ manualer:{avser:['modell','Gäller produkt'],version:[null,'Version'],lank:['url','Länk'],datum:[null,'Datum']}
+};
+const V1_META=new Set(['id','kat','namn','anteckning','skapad','andrad','laddningar','tillverkare']);
+const str=(v,max=200)=>v==null?'':String(v).trim().slice(0,max);
+function migreraV1(r,upptagna){
+  const ny=r.kat==='manualer'?'dokument':(TYPER[r.kat]?r.kat:'dokument'); const def=TYPER[ny]; const falt=k=>def.falt.find(f=>f[0]===k);
+  let id=typeof r.id==='string'&&r.id.trim()?r.id.trim().slice(0,100):uid(); if(upptagna&&upptagna.has(id)) id=uid();
+  const p={id,kat:ny,skapad:typeof r.skapad==='string'?r.skapad.slice(0,40):new Date().toISOString(),andrad:typeof r.andrad==='string'?r.andrad.slice(0,40):new Date().toISOString()};
+  const noter=[]; const karta=V1KARTA[r.kat]||{};
+  if(!TYPER[r.kat]&&r.kat!=='manualer') noter.push(`Kategori: ${str(r.kat)}`);
+  p[ny==='dokument'?'titel':'modell']=str(r.namn)||'Namnlös post';
+  if(falt('tillverkare')) p.tillverkare=str(r.tillverkare)||(falt('tillverkare')[3]&&falt('tillverkare')[3].req?'Okänd tillverkare':'');
+  for(const [k,v] of Object.entries(r)){
+    if(V1_META.has(k)||v===''||v==null||v===false) continue;
+    const [mal,etikett]=karta[k]||[null,k]; const f=mal&&falt(mal);
+    if(f){ let x=v; if((f[2]==='num'||f[2]==='int')&&typeof x==='string'){ const m=x.match(/^\s*(\d+(?:[.,]\d+)?)\s*s?\s*$/i); if(m) x=m[1].replace(',','.'); }
+      let n=''; try{ n=normalisera(f,typeof x==='number'?x:String(x)); }catch(_){ n=''; }
+      if(n!==''){ p[mal]=n; const lika=String(n)===String(v).trim()||((f[2]==='num'||f[2]==='int')&&x!==v); if(lika) continue; }
+      noter.push(`${etikett}: ${str(v,1000)}`); continue; }
+    noter.push(`${etikett}: ${typeof v==='object'?str(JSON.stringify(v),1000):str(v,1000)}`);
+  }
+  for(const f of def.falt) if(p[f[0]]===undefined) p[f[0]]=f[2]==='bool'?false:'';
+  if(def.historik) p.laddningar=(Array.isArray(r.laddningar)?r.laddningar:[]).filter(x=>x&&/^\d{4}-\d{2}-\d{2}$/.test(x.datum)).map(x=>({datum:x.datum,cykler:Math.max(0,Math.min(10000,parseInt(x.cykler,10)||0))}));
+  const notFalt=falt('anteckningar')?'anteckningar':'beskrivning';
+  const delar=[str(r.anteckning,10000)]; if(noter.length) delar.push('Från version 1:\n'+noter.join('\n'));
+  p[notFalt]=delar.filter(Boolean).join('\n\n').slice(0,10000);
+  return {post:p,flyttade:noter.length};
 }
 function validera(data){
   if(!data||typeof data!=='object'||Array.isArray(data)) throw new Error('Filen är ingen export från Min Hangar.');
@@ -295,10 +344,10 @@ function validera(data){
   if(data.version>VERSION) throw new Error(`Filen har version ${data.version}, men appen stöder bara upp till version ${VERSION}. Uppdatera appen först.`);
   if(!Array.isArray(data.poster)) throw new Error('Fältet "poster" saknas.');
   if(data.poster.length>20000) throw new Error('För många poster.');
-  const sedda=new Set(); let dubbletter=0; const ut=[];
+  const sedda=new Set(); let dubbletter=0, v1flyttade=0; const ut=[];
   data.poster.forEach((r0,i)=>{
     if(!r0||typeof r0!=='object'||Array.isArray(r0)) throw new Error(`Post ${i+1} är ogiltig.`);
-    const r=data.version===1?migreraV1(r0):r0; const def=TYPER[r.kat];
+    if(data.version===1){ const m=migreraV1(r0); v1flyttade+=m.flyttade; r0=m.post; } const r=r0; const def=TYPER[r.kat];
     if(!def) throw new Error(`Post ${i+1}: okänd kategori "${String(r.kat).slice(0,40)}".`);
     const id=typeof r.id==='string'&&r.id.trim()?r.id.trim().slice(0,100):uid();
     if(sedda.has(id)){ dubbletter++; return; } sedda.add(id);
@@ -307,15 +356,16 @@ function validera(data){
     if(def.historik){ const h=r.laddningar==null?[]:r.laddningar; if(!Array.isArray(h)) throw new Error(`Post ${i+1}: laddningshistoriken är ogiltig.`);
       p.laddningar=h.map((x,j)=>{ if(!x||!/^\d{4}-\d{2}-\d{2}$/.test(x.datum)) throw new Error(`Post ${i+1}: laddning ${j+1} har ogiltigt datum.`);
         const c=Number(x.cykler); if(!Number.isInteger(c)||c<0||c>10000) throw new Error(`Post ${i+1}: laddning ${j+1} har ogiltigt antal cykler.`); return {datum:x.datum,cykler:c}; }); }
+    if(p.kat==='firmware'&&p.produkt&&p.radiosandare) throw new Error(`Post ${i+1}: välj antingen produkt eller radiosändare, inte båda.`);
     ut.push(p);
   });
-  return {lista:ut,dubbletter};
+  return {lista:ut,dubbletter,v1flyttade};
 }
 async function importera(fil){
   try{
     if(fil.size>20*1024*1024) throw new Error('Filen är för stor.');
     let data; try{ data=JSON.parse(await fil.text()); }catch(_){ throw new Error('Filen är inte giltig JSON.'); }
-    const {lista,dubbletter}=validera(data);
+    const {lista,dubbletter,v1flyttade}=validera(data);
     const befintliga=new Set(poster.map(p=>p.id)); const uppd=lista.filter(p=>befintliga.has(p.id)).length;
     let varning='';
     if(!lista.length) varning=`<p class="varning"><b>Varning:</b> Filen innehåller inga poster. Väljer du Ersätt raderas alla ${antal(poster.length)} du har nu.</p>`;
@@ -326,7 +376,7 @@ async function importera(fil){
     if(svar==='avbryt'){ toast('Importen avbröts. Inget ändrades.'); return; }
     await tx(s=>{ if(svar==='ersatt') s.clear(); lista.forEach(p=>s.put(p)); }); // en enda atomisk transaktion
     await ladda(); render();
-    toast(svar==='ersatt'?`Ersatte all data med ${antal(lista.length)}.`:`Sammanslagning klar: ${lista.length-uppd} nya, ${uppd} uppdaterade${dubbletter?`, ${dubbletter} dubbletter hoppades över`:''}.`);
+    toast(svar==='ersatt'?`Ersatte all data med ${antal(lista.length)}.`:`Sammanslagning klar: ${lista.length-uppd} nya, ${uppd} uppdaterade${dubbletter?`, ${dubbletter} dubbletter hoppades över`:''}.`+(v1flyttade?` ${v1flyttade} fält från version 1 lades i anteckningarna.`:''));
   }catch(e){ toast('Importen misslyckades: '+e.message); }
 }
 
@@ -350,12 +400,13 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change',temaEtike
 $('#exportKnapp').onclick=exportera;
 $('#importKnapp').onclick=()=>$('#importFil').click();
 $('#importFil').onchange=e=>{ const f=e.target.files[0]; if(f) importera(f); e.target.value=''; };
-window.addEventListener('hashchange',()=>{ render(); window.scrollTo(0,0); });
-ladda().then(render).catch(e=>{ vy().innerHTML='<p class="panel">Kunde inte öppna den lokala databasen: '+esc(e.message)+'</p>'; });
+function fokusVy(){ const h=vy().querySelector('h1'); const m=h||vy(); if(h) h.setAttribute('tabindex','-1'); m.focus({preventScroll:true}); }
+window.addEventListener('hashchange',()=>{ render(); window.scrollTo(0,0); fokusVy(); });
+ladda().then(()=>{ render(); if(migreringsInfo) toast(`Dina ${antal(migreringsInfo.antal)} uppgraderades till den nya versionen${migreringsInfo.flyttade?` (${migreringsInfo.flyttade} fält lades i anteckningarna)`:''}. En säkerhetskopia sparades.`); }).catch(e=>{ vy().innerHTML='<p class="panel">Kunde inte öppna den lokala databasen: '+esc(e.message)+'</p>'; });
 if('serviceWorker' in navigator&&location.protocol!=='file:'){
-  navigator.serviceWorker.register('sw.js').catch(()=>{});
+  navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).catch(()=>{});
   let hadCtrl=!!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{ if(hadCtrl) toast('En ny version är installerad. Ladda om sidan för att använda den.'); hadCtrl=true; });
 }
-window.__minHangar={TYPER,KATEGORIER};
+window.__minHangar={TYPER,KATEGORIER,APPVER,migreraV1};
 })();

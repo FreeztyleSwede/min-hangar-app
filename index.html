@@ -5,11 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>FreeStyle Swede – Min Hangar</title>
 <meta name="description" content="Håll koll på din RC-utrustning – fungerar offline.">
+<meta name="app-version" content="3">
 <meta name="theme-color" content="#0f1720">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=3">
 <script>try{var t=localStorage.getItem('mh-tema');if(t)document.documentElement.dataset.theme=t;}catch(e){}</script>
 </head>
 <body>
@@ -33,6 +34,6 @@
 <dialog id="dlg" aria-labelledby="dlgTitel"><h2 id="dlgTitel"></h2><form id="postForm" class="postform" novalidate></form></dialog>
 <dialog id="fraga" aria-labelledby="fragaTitel" aria-describedby="fragaText"><h2 id="fragaTitel"></h2><div id="fragaText"></div><div class="rad dlgknappar" id="fragaKnappar"></div></dialog>
 <div id="toast" role="status" aria-live="polite"></div>
-<script src="app.js"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>
