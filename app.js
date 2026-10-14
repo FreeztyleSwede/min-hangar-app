@@ -1,6 +1,6 @@
 'use strict';
 (function(){
-const APP='min-hangar', VERSION=2, APPVER='3';
+const APP='min-hangar', VERSION=2, APPVER='9';
 // ---------- Fältdefinitioner (följer originalets lib/equipment-categories.ts, lib/aircraft-fields.ts och formulärkomponenterna) ----------
 const AIRCRAFT_TYPES=['3D-flygplan','Segelflygplan','Skala','Warbird','Trainer','Jet','Övrigt'];
 const PROPULSION=['El','Bränsle','Turbin','Övrigt'];
@@ -51,6 +51,10 @@ let poster=[], filter='';
 // ---------- IndexedDB ----------
 let dbp;
 let migreringsInfo=null;
+function visaBlockerad(rub,text){ // P1: bestående meddelande i sidan i stället för en tom vy
+  const v=document.getElementById('vy'); if(!v) return;
+  v.innerHTML=`<section class="panel blockerad" role="alert"><h1>${esc(rub)}</h1><p>${esc(text)}</p><button class="btn" type="button" id="laddaOm">Ladda om sidan</button></section>`;
+  v._upd=null; document.getElementById('laddaOm').onclick=()=>location.reload(); }
 function arV1(rec){ return !!rec&&typeof rec==='object'&&(rec.kat==='manualer'||('namn' in rec)||(!!TYPER[rec.kat]&&!('modell' in rec)&&!('titel' in rec)&&!('version' in rec))); }
 function db(){ return dbp||(dbp=new Promise((res,rej)=>{ const r=indexedDB.open('min-hangar',2);
   r.onupgradeneeded=e=>{ const d=r.result, t=r.transaction; let s;
@@ -64,14 +68,16 @@ function db(){ return dbp||(dbp=new Promise((res,rej)=>{ const r=indexedDB.open(
         for(const rec of v1){ const m=migreraV1(rec,upptagna); if(m.post.id!==rec.id) s.delete(rec.id); upptagna.add(m.post.id); s.put(m.post); flyttade+=m.flyttade; }
         migreringsInfo={antal:v1.length,flyttade};
       }catch(err){ console.warn('Migreringen avbröts',err); t.abort(); } }; } };
-  r.onblocked=()=>toast('Min Hangar är öppen i en annan flik med en äldre version. Stäng den flikarna för att slutföra uppgraderingen.');
-  r.onsuccess=()=>{ const d=r.result; d.onversionchange=()=>{ d.close(); toast('En nyare version av Min Hangar öppnades i en annan flik. Ladda om sidan.'); }; res(d); };
+  r.onblocked=()=>visaBlockerad('Uppgraderingen väntar','Min Hangar är öppen i en annan flik eller ett hemskärmsfönster med en äldre version. Stäng de andra flikarna med Min Hangar, så fortsätter uppgraderingen automatiskt. Ingen data går förlorad.');
+  r.onsuccess=()=>{ const d=r.result; d.onversionchange=()=>{ d.close(); visaBlockerad('En nyare version är öppen','En nyare version av Min Hangar har öppnats i en annan flik. Ladda om den här sidan för att fortsätta – ändringar kan inte sparas här längre.'); }; res(d); };
   r.onerror=()=>rej(r.error); })); }
 async function tx(fn){ const d=await db(); return new Promise((res,rej)=>{ const t=d.transaction('poster','readwrite'); fn(t.objectStore('poster')); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error||new Error('Transaktionen avbröts.')); }); }
 async function ladda(){ const d=await db(); poster=await new Promise((res,rej)=>{ const r=d.transaction('poster').objectStore('poster').getAll(); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });
   poster=poster.filter(p=>p&&TYPER[p.kat]); poster.sort((a,b)=>rubrik(a).localeCompare(rubrik(b),'sv')); }
-const spara=p=>tx(s=>s.put(p));
-const tabort=id=>tx(s=>s.delete(id));
+// S1: slå ihop med det som redan ligger i databasen (en annan flik kan ha ändrat posten), i samma transaktion
+const spara=p=>tx(s=>{ const g=s.get(p.id); g.onsuccess=()=>{ const c=g.result; s.put(c&&c.kat!=='_raderad'&&c.kat===p.kat?slaIhopPost(c,p):p); }; }).then(markeraAndring);
+// Radering sparas som tombstone så att posten inte återuppstår vid molnsynk.
+const tabort=id=>tx(s=>s.put({id,kat:'_raderad',raderad:new Date().toISOString(),_d:nyStampel()})).then(markeraAndring);
 
 // ---------- Hjälp ----------
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('visa'); clearTimeout(toast.h); toast.h=setTimeout(()=>t.classList.remove('visa'),3500); }
@@ -85,6 +91,36 @@ function sokText(p){ if(!TYPER[p.kat]) return ''; const k=KAT_FOR_TYP[p.kat]; re
 function matchar(p,q){ if(!q) return true; const t=sokText(p); return q.toLocaleLowerCase('sv').split(/\s+/).filter(Boolean).every(w=>t.includes(w)); }
 const antal=n=>n===1?'1 post':n+' poster';
 const fmtUnit=(f,v)=>esc(v);
+
+// ---------- Versioner per fält (Lamport-klocka) för konfliktfri sammanslagning ----------
+const lsGet=k=>{try{return localStorage.getItem(k)}catch(_){return null}}, lsSet=(k,v)=>{try{localStorage.setItem(k,v)}catch(_){}}, lsDel=k=>{try{localStorage.removeItem(k)}catch(_){}};
+const ENHET=(()=>{ let e=lsGet('mh-enhet'); if(!e){ e=uid().replace(/-/g,'').slice(0,12); lsSet('mh-enhet',e); } return e; })();
+let lamport=Number(lsGet('mh-lamport'))||0;
+const FLIK=uid().replace(/-/g,'').slice(0,6); // unik per flik → två flikar kan aldrig få samma stämpel
+function lasLamport(){ const n=Number(lsGet('mh-lamport'))||0; if(n>lamport) lamport=n; }
+window.addEventListener('storage',e=>{ if(e.key==='mh-lamport') lasLamport(); });
+function nyStampel(){ lasLamport(); lamport+=1; lsSet('mh-lamport',String(lamport)); return [lamport,ENHET+'.'+FLIK]; }
+function seStampel(s){ lasLamport(); if(Array.isArray(s)&&s[0]>lamport){ lamport=s[0]; lsSet('mh-lamport',String(lamport)); } }
+const NOLL=[0,''];
+const jmf=(a,b)=>{ a=a||NOLL; b=b||NOLL; return (a[0]-b[0])||(a[1]<b[1]?-1:a[1]>b[1]?1:0); };
+function rensaStampel(s){ return Array.isArray(s)&&Number.isInteger(s[0])&&s[0]>=0&&s[0]<1e12&&typeof s[1]==='string'?[s[0],s[1].slice(0,40)]:undefined; }
+const faltNycklar=kat=>[...TYPER[kat].falt.map(f=>f[0]),...(TYPER[kat].historik?['laddningar']:[])];
+function maxStampel(r){ if(!r) return NOLL; if(r.kat==='_raderad') return r._d||NOLL; let m=NOLL; for(const s of Object.values(r._f||{})) if(jmf(s,m)>0) m=s; return m; }
+function stampla(ny,gammal){ ny._f={...(gammal&&gammal._f||{})}; const s=nyStampel();
+  for(const k of faltNycklar(ny.kat)) if(!gammal||kanon(ny[k]??'')!==kanon(gammal[k]??'')) ny._f[k]=s; return ny; }
+function kanon(v){ return JSON.stringify(v,(k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.keys(x).sort().reduce((o,n)=>(o[n]=x[n],o),{}):x); }
+function slaIhopPost(a,b){ // a = lokal, b = annan källa. Per fält vinner högsta stämpel; lika → a.
+  if(!a) return b; if(!b) return a;
+  const at=a.kat==='_raderad', bt=b.kat==='_raderad';
+  if(at&&bt) return jmf(b._d,a._d)>0?b:a;
+  if(at||bt){ const t=at?a:b, r=at?b:a; return jmf(maxStampel(r),t._d||NOLL)>0?r:t; } // radering vinner om ingen ändring gjorts efter den
+  const ma=maxStampel(a), mb=maxStampel(b);
+  if(!ma[0]&&!mb[0]) return (Date.parse(b.andrad)||0)>(Date.parse(a.andrad)||0)?b:a; // äldre data utan versioner
+  if(a.kat!==b.kat) return jmf(mb,ma)>0?b:a;
+  const ut={...a,_f:{...(a._f||{})}};
+  for(const k of faltNycklar(a.kat)){ const sb=(b._f||{})[k], c=jmf(sb,(a._f||{})[k]); if(c>0||(c===0&&sb&&sb[0]>0&&kanon(a[k]??'')!==kanon(b[k]??''))){ ut[k]=b[k]; if(sb) ut._f[k]=sb; } } // lika version men olika värde (handredigerad fil): ta b
+  if(jmf(mb,ma)>0) ut.andrad=b.andrad;
+  return ut; }
 
 // ---------- Dialoger (ersätter confirm) ----------
 function fraga({titel,text,knappar}){ return new Promise(res=>{
@@ -105,6 +141,7 @@ function render(){
   if(a==='utrustning'&&KATMAP[b]&&b!=='flygmodeller') return vyKategori(KATMAP[b]);
   if(a==='flygmodeller'){ if(!b) return vyFlyglista(); if(b==='ny') return vyFlygForm(null);
     const p=hitta(b); if(p&&p.kat==='flygmodeller') return c==='redigera'?vyFlygForm(p):vyFlygDetalj(p); return vyEjHittad(); }
+  if(a==='molnlagring') return vyMoln();
   if(a==='admin'||a==='auth') return vyInfo();
   if(a) return vyEjHittad();
   return vyStart();
@@ -265,6 +302,7 @@ function byggForm(form,typ,p,efter,avbryt){
     const ny={id:p?p.id:uid(),kat:typ,skapad:p?p.skapad:new Date().toISOString(),andrad:new Date().toISOString()};
     try{ for(const f of def.falt){ const raw=f[2]==='bool'?fd.has(f[0]):String(fd.get(f[0])??'').trim(); ny[f[0]]=normalisera(f,raw,true); }
       if(def.historik) ny.laddningar=hist;
+      stampla(ny,p);
       if(typ==='firmware'&&ny.produkt&&ny.radiosandare) throw new Error('Välj antingen produkt eller radiosändare, inte båda.'); }
     catch(err){ form.querySelector('#formFel').textContent=err.message; return; }
     await spara(ny); await ladda(); await efter(ny); };
@@ -292,12 +330,186 @@ function normalisera(f,v,franForm){
   return v;
 }
 
+// ---------- Molnlagring: Google Drive (appDataFolder) via Google Identity Services, token-flöde i webbläsaren ----------
+// Konstanter. Testerna byter ut värdena genom att skriva om app.js i testmiljön – det finns inga testkrokar i produktionskoden.
+const GOOGLE_CLIENT_ID='639271146102-1l36e5rl6ful64bvkgctd5kb32gkmrh2.apps.googleusercontent.com'; // OAuth-klient-ID av typen "Webbprogram". Tomt = molnsynk är inte aktiverad.
+const SYNK_DEBOUNCE=2000, BACKOFF_BAS=5000, BACKOFF_MAX=300000, GIS_TIDSGRANS=10000, FETCH_TIDSGRANS=20000, TOKEN_TIDSGRANS=120000;
+const TOMBSTONE_DAGAR=90;
+const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.appdata';
+const MOLNFIL='min-hangar.json';
+const DRIVE='https://www.googleapis.com/drive/v3', UPLOAD='https://www.googleapis.com/upload/drive/v3';
+const klientId=()=>GOOGLE_CLIENT_ID;
+const moln={token:null,utgar:0,status:'av',fel:'',not:'',senast:Number(lsGet('mh-moln-senast'))||0,timer:null,pagar:null,igen:false,forsok:0,okanda:[]};
+const molnAnsluten=()=>!!klientId()&&lsGet('mh-moln-ansluten')==='1';
+const klock=t=>new Date(t).toLocaleString('sv-SE',{dateStyle:'short',timeStyle:'short'});
+function statusText(){ switch(moln.status){ case 'synkar':return 'Synkar…'; case 'synkad':return 'Synkad'; case 'offline':return 'Offline – ändringar köas';
+  case 'pausad':return 'Pausad – tryck på Synka nu'+(moln.fel?` (${moln.fel})`:''); case 'fel':return 'Fel: '+moln.fel; case 'logga-in':return 'Logga in igen: '+moln.fel;
+  default:return molnAnsluten()?'Ansluten':'Inte inloggad'; } }
+function ritaStatus(){
+  const t=statusText(), s=moln.senast?'Senast synkad '+klock(moln.senast):'Inte synkad ännu';
+  document.querySelectorAll('[data-synkstatus]').forEach(e=>{ e.textContent=t; e.dataset.status=moln.status; });
+  document.querySelectorAll('[data-synksenast]').forEach(e=>e.textContent=s);
+  document.querySelectorAll('[data-synknot]').forEach(e=>{ e.textContent=moln.not; e.hidden=!moln.not; });
+  const rad=$('#synkrad'); if(rad) rad.hidden=!molnAnsluten();
+  const inl=$('#molnLoggaIn'), ut=$('#molnLoggaUt'), nu=$('#molnSynka');
+  if(inl){ inl.hidden=molnAnsluten()&&moln.status!=='logga-in'; ut.hidden=!molnAnsluten(); nu.hidden=!molnAnsluten(); /* S3: Synka nu finns kvar även efter GIS-tidsgräns */ }
+}
+function satStatus(s,fel){ moln.status=s; moln.fel=fel||''; ritaStatus(); }
+function medTidsgrans(p,ms,text){ let t; return Promise.race([p,new Promise((_,rej)=>{ t=setTimeout(()=>rej(Object.assign(new Error(text),{natfel:true})),ms); })]).finally(()=>clearTimeout(t)); }
+let gisP=null; // GIS laddas bara när det behövs; ligger på annan origin och cachas aldrig av service workern.
+function laddaGis(){ if(gisP) return gisP;
+  gisP=medTidsgrans(new Promise((res,rej)=>{
+    if(window.google&&google.accounts&&google.accounts.oauth2) return res();
+    const s=document.createElement('script'); s.src='https://accounts.google.com/gsi/client'+(laddaGis.n?'?forsok='+laddaGis.n:''); laddaGis.n=(laddaGis.n||0)+1; s.async=true; // ny URL vid nytt försök, så att en hängande förfrågan inte återanvänds
+    s.onload=()=>window.google&&google.accounts&&google.accounts.oauth2?res():rej(new Error('Google-inloggningen kunde inte laddas.'));
+    s.onerror=()=>{ s.remove(); rej(Object.assign(new Error('Google-inloggningen kunde inte laddas. Kontrollera anslutningen.'),{natfel:true})); };
+    document.head.appendChild(s); }),GIS_TIDSGRANS,'Google-inloggningen svarar inte (tidsgräns).').catch(e=>{ gisP=null; throw e; });
+  return gisP; }
+const gisRedo=()=>!!(window.google&&google.accounts&&google.accounts.oauth2);
+// Token begärs BARA efter ett tryck (R5). requestAccessToken anropas synkront i klickhändelsen när GIS redan är laddat,
+// så att popupfönstret inte blockeras i Safari/iOS. prompt:'' = ingen fråga om samtycke redan har getts.
+function begarToken(samtycke){ return new Promise((res,rej)=>{
+  let klar=false; const t=setTimeout(()=>{ if(!klar){ klar=true; rej(new Error('Inloggningen tog för lång tid.')); } },TOKEN_TIDSGRANS);
+  const tc=google.accounts.oauth2.initTokenClient({client_id:klientId(),scope:DRIVE_SCOPE,
+    callback:r=>{ if(klar) return; klar=true; clearTimeout(t); if(r&&r.access_token){ moln.token=r.access_token; moln.utgar=Date.now()+Math.max(60,(Number(r.expires_in)||3600)-60)*1000; res(); }
+      else rej(new Error((r&&(r.error_description||r.error))||'Ingen åtkomst beviljades.')); },
+    error_callback:e=>{ if(klar) return; klar=true; clearTimeout(t); rej(new Error(e&&e.type==='popup_closed'?'Inloggningsfönstret stängdes.':e&&e.type==='popup_failed_to_open'?'Inloggningsfönstret blockerades.':'Inloggningen misslyckades.')); }});
+  tc.requestAccessToken({prompt:samtycke?'consent':''}); }); }
+async function tryck(samtycke){ // anropas direkt från klickhändelsen
+  if(!navigator.onLine){ satStatus('offline'); return; }
+  try{ if(!gisRedo()){ satStatus('synkar'); await laddaGis(); } // första gången kan popupen behöva ett andra tryck i Safari
+    await begarToken(samtycke); lsSet('mh-moln-ansluten','1'); moln.forsok=0; await synka(); }
+  catch(e){ satStatus(molnAnsluten()?'logga-in':'av',e.message); if(!molnAnsluten()) toast(e.message); }
+}
+const harToken=()=>!!moln.token&&Date.now()<moln.utgar;
+async function hamta(url,opt){ const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),FETCH_TIDSGRANS);
+  try{ return await fetch(url,{...opt,signal:ac.signal}); }
+  catch(_){ throw Object.assign(new Error(ac.signal.aborted?'Google Drive svarar inte (tidsgräns).':'Ingen kontakt med Google Drive.'),{natfel:true}); }
+  finally{ clearTimeout(t); } }
+async function drive(url,opt={}){
+  if(!harToken()) throw Object.assign(new Error('Inloggningen har gått ut.'),{pausa:true});
+  const res=await hamta(url,{...opt,headers:{...(opt.headers||{}),Authorization:'Bearer '+moln.token}});
+  if(res.status===401){ moln.token=null; throw Object.assign(new Error('Inloggningen har gått ut.'),{pausa:true}); }
+  if(!res.ok){ const ra=Number(res.headers.get('Retry-After')); throw Object.assign(new Error(`Google Drive svarade ${res.status}.`),{status:res.status,retryAfter:ra>0?ra*1000:0}); }
+  return res;
+}
+async function allaRader(){ const d=await db(); return new Promise((res,rej)=>{ const r=d.transaction('poster').objectStore('poster').getAll(); r.onsuccess=()=>res(r.result.filter(Boolean)); r.onerror=()=>rej(r.error); }); }
+async function sparaKopia(prefix,rader){ const d=await db(); return new Promise((res,rej)=>{ const t=d.transaction('sakerhetskopia','readwrite'); const s=t.objectStore('sakerhetskopia');
+  s.put({nyckel:prefix+'-'+new Date().toISOString(),skapad:new Date().toISOString(),poster:rader});
+  const k=s.getAllKeys(); k.onsuccess=()=>{ const egna=k.result.filter(x=>String(x).startsWith(prefix+'-')).sort(); egna.slice(0,Math.max(0,egna.length-5)).forEach(x=>s.delete(x)); };
+  t.oncomplete=res; t.onerror=()=>rej(t.error); }); }
+function lasMolnData(data){
+  if(!data||data.app!==APP||!Array.isArray(data.poster)) throw new Error('Molnfilen har fel format.');
+  // R3: ogiltiga/okända poster (t.ex. från en nyare appversion) hoppas över och lämnas orörda i molnfilen.
+  const {lista,hoppade}=validera({app:APP,version:Math.min(Number.isInteger(data.version)?data.version:VERSION,VERSION),poster:data.poster},{hoppa:true});
+  const raderade=(Array.isArray(data.raderade)?data.raderade:[]).filter(x=>x&&typeof x.id==='string'&&x.id&&!isNaN(Date.parse(x.raderad)))
+    .map(x=>({id:x.id.slice(0,100),kat:'_raderad',raderad:x.raderad,_d:rensaStampel(x._d)}));
+  return {poster:lista,raderade,hoppade};
+}
+function molnData(rader,okanda){ return {app:APP,version:VERSION,appver:APPVER,format:'synk',uppdaterad:new Date().toISOString(),
+  poster:[...rader.filter(r=>r.kat!=='_raderad'),...okanda],raderade:rader.filter(r=>r.kat==='_raderad').map(r=>({id:r.id,raderad:r.raderad,_d:r._d}))}; }
+function slaIhop(lokalt,fjarr){
+  const L=new Map(lokalt.map(r=>[r.id,r])), F=new Map();
+  for(const r of [...fjarr.poster,...fjarr.raderade]){ seStampel(maxStampel(r)); F.set(r.id,F.has(r.id)?slaIhopPost(F.get(r.id),r):r); }
+  const grans=Date.now()-TOMBSTONE_DAGAR*864e5;
+  const ut=[], tillLokalt=[], rensa=[]; let tillFjarr=false;
+  for(const id of new Set([...L.keys(),...F.keys()])){ const l=L.get(id), f=F.get(id); const v=slaIhopPost(l,f);
+    if(v.kat==='_raderad'&&Date.parse(v.raderad)<grans){ if(l) rensa.push(id); if(f) tillFjarr=true; continue; } // R7: städa gamla tombstones
+    ut.push(v); if(!l||kanon(v)!==kanon(l)) tillLokalt.push(v); if(!f||kanon(v)!==kanon(f)) tillFjarr=true; }
+  return {ut,tillLokalt,tillFjarr,rensa};
+}
+function synka(){
+  if(!molnAnsluten()) return Promise.resolve();
+  if(moln.pagar){ moln.igen=true; return moln.pagar; }
+  if(!navigator.onLine){ satStatus('offline'); return Promise.resolve(); }
+  if(!harToken()){ satStatus('pausad'); return Promise.resolve(); } // R5: ingen tyst popup – vänta på ett tryck
+  clearTimeout(moln.timer);
+  moln.pagar=(async()=>{ satStatus('synkar'); const andring=lsGet('mh-moln-andring');
+    try{
+      for(let varv=0;;varv++){
+        const q=encodeURIComponent(`name='${MOLNFIL}'`);
+        const fil=((await (await drive(`${DRIVE}/files?spaces=appDataFolder&q=${q}&fields=files(id,version)`)).json()).files||[])[0];
+        const fjarr=fil?lasMolnData(await (await drive(`${DRIVE}/files/${encodeURIComponent(fil.id)}?alt=media`)).json()):{poster:[],raderade:[],hoppade:[]};
+        moln.okanda=fjarr.hoppade;
+        const lokalt=await allaRader();
+        const {ut,tillLokalt,tillFjarr,rensa}=slaIhop(lokalt,fjarr);
+        if(tillLokalt.length||rensa.length){ await sparaKopia('fore-synk',lokalt);
+          await tx(s=>{ for(const id of rensa) s.delete(id);
+            for(const r of tillLokalt){ const g=s.get(r.id); g.onsuccess=()=>{ const c=g.result; s.put(c&&kanon(c)!==kanon(lokalt.find(x=>x.id===r.id)||null)?slaIhopPost(c,r):r); }; } });
+          await ladda(); const v=vy(); v._upd?v._upd():render(); }
+        if(tillFjarr||!fil){ const body=JSON.stringify(molnData(ut,fjarr.hoppade));
+          if(fil){ // R10: optimistisk låsning – kontrollera att filen inte ändrats sedan vi läste den
+            const nu=await (await drive(`${DRIVE}/files/${encodeURIComponent(fil.id)}?fields=version`)).json();
+            if(String(nu.version)!==String(fil.version)&&varv<3) continue;
+            await drive(`${UPLOAD}/files/${encodeURIComponent(fil.id)}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body}); }
+          else { const g='mh'+uid().replace(/-/g,''); const meta=JSON.stringify({name:MOLNFIL,parents:['appDataFolder'],mimeType:'application/json'});
+            await drive(`${UPLOAD}/files?uploadType=multipart&fields=id`,{method:'POST',headers:{'Content-Type':'multipart/related; boundary='+g},
+              body:`--${g}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${g}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${g}--`}); } }
+        break;
+      }
+      moln.not=moln.okanda.length?`${antal(moln.okanda.length)} i molnet kunde inte läsas av den här versionen och lämnades orörda. Uppdatera appen.`:'';
+      moln.senast=Date.now(); lsSet('mh-moln-senast',String(moln.senast)); moln.forsok=0;
+      if(lsGet('mh-moln-andring')===andring) lsDel('mh-moln-osynkat'); else moln.igen=true;
+      satStatus('synkad');
+    }catch(e){
+      if(e.pausa){ moln.token=null; satStatus('pausad',e.message); }
+      else if(e.natfel&&!navigator.onLine) satStatus('offline');
+      else { // R4: nytt försök med exponentiell backoff och jitter, respekterar Retry-After
+        moln.forsok++; const vant=Math.max(e.retryAfter||0,Math.min(BACKOFF_MAX,BACKOFF_BAS*2**(moln.forsok-1))*(0.8+Math.random()*0.4));
+        satStatus('fel',`${e.message||'Okänt fel'} Nytt försök om ${Math.max(1,Math.round(vant/1000))} s.`);
+        clearTimeout(moln.timer); moln.timer=setTimeout(synka,vant); }
+    }
+    finally{ moln.pagar=null; if(moln.igen){ moln.igen=false; if(moln.status==='synkad') schemalagg(); } }
+  })();
+  return moln.pagar;
+}
+function schemalagg(){ if(!molnAnsluten()) return; if(!navigator.onLine){ satStatus('offline'); return; }
+  if(!harToken()){ satStatus('pausad'); return; }
+  clearTimeout(moln.timer); moln.timer=setTimeout(synka,SYNK_DEBOUNCE); }
+const kanal=typeof BroadcastChannel==='function'?new BroadcastChannel('min-hangar'):null;
+if(kanal) kanal.onmessage=async e=>{ if(e.data==='andrad'){ await ladda(); if(!$('#dlg')?.open){ const v=vy(); v._upd?v._upd():render(); } } };
+function markeraAndring(){ if(kanal) kanal.postMessage('andrad'); lsSet('mh-moln-andring',uid()); if(molnAnsluten()){ lsSet('mh-moln-osynkat','1'); schemalagg(); } }
+function loggaUt(){ const t=moln.token; moln.token=null; clearTimeout(moln.timer); moln.forsok=0;
+  if(t&&gisRedo()) google.accounts.oauth2.revoke(t,()=>{});
+  lsDel('mh-moln-ansluten'); lsDel('mh-moln-osynkat'); moln.not=''; satStatus('av'); toast('Utloggad från Google Drive. Datan finns kvar på den här enheten.'); }
+window.addEventListener('online',()=>{ if(molnAnsluten()) synka(); });
+window.addEventListener('offline',()=>{ if(molnAnsluten()) satStatus('offline'); });
+function startaMoln(){ if(!molnAnsluten()) return ritaStatus(); if(!navigator.onLine) return satStatus('offline'); satStatus('pausad'); }
+
+// ---------- Vy: Molnlagring ----------
+function vyMoln(){
+  titel('Molnlagring'); setMeny('#/molnlagring');
+  const g=klientId()?`<p class="status" data-synkstatus role="status"></p><p class="muted" data-synksenast></p><p class="varning" data-synknot hidden></p>
+     <div class="knappar"><button class="btn" type="button" id="molnLoggaIn">Logga in med Google</button><button class="btn" type="button" id="molnSynka">Synka nu</button><button class="btn ghost" type="button" id="molnLoggaUt">Logga ut</button></div>
+     <p class="muted">Datan sparas som en dold fil (${MOLNFIL}) i appens egen mapp i din Google Drive. Min Hangar kan bara se sin egen fil, inte dina övriga dokument. Av säkerhetsskäl sparas inloggningen bara medan sidan är öppen: tryck på <b>Synka nu</b> när du öppnar appen, sedan synkas ändringar automatiskt. Offline köas de tills du är online igen.</p>
+     <p class="muted">Ändrar två enheter samma post slås ändringarna ihop fält för fält. Ändras samma fält efter varandra behålls den senaste ändringen enligt appens versionsräknare (inte enhetens klocka). Ändras samma fält på två enheter samtidigt, t.ex. offline, behålls en av ändringarna – samma på alla enheter. En säkerhetskopia sparas lokalt före varje sammanslagning. Raderade poster glöms efter ${TOMBSTONE_DAGAR} dagar.</p>`
+    :`<p class="varning" id="molnAv">Molnsynk är inte aktiverad i den här versionen av appen. När ett Google-klient-ID har lagts in kan du synka din hangar mellan enheter via Google Drive. Tills dess: använd export och import nedan.</p>`;
+  vy().innerHTML=`<div class="rubrikkort"><p class="kicker">Säkerhetskopiera och synka</p><h1>Molnlagring</h1><p class="lead">Din hangar sparas på den här enheten. Här kan du synka den via Google Drive eller spara en kopia i Filer och iCloud Drive.</p></div>
+   <section class="panel" aria-labelledby="hDrive"><h2 id="hDrive">Google Drive</h2>${g}</section>
+   <section class="panel" aria-labelledby="hIcloud"><h2 id="hIcloud">iCloud och Filer</h2>
+    <p>Spara en säkerhetskopia som en JSON-fil. På iPhone och iPad öppnas delningsmenyn: välj <b>Spara i Filer</b> och sedan <b>iCloud Drive</b>, så finns kopian på alla dina Apple-enheter. På en dator laddas filen ner, och du kan flytta den till iCloud Drive eller en annan molnmapp.</p>
+    <p>För att återställa eller flytta till en ny enhet: välj <b>Hämta från Filer</b>, bläddra till iCloud Drive och välj filen. Du får sedan välja om den ska ersätta eller slås ihop med det du har.</p>
+    <div class="knappar"><button class="btn" type="button" id="delaKnapp">Spara i Filer / iCloud Drive</button><button class="btn ghost" type="button" id="hamtaFilKnapp">Hämta från Filer / iCloud Drive</button></div></section>`;
+  if(klientId()){ $('#molnLoggaIn').onclick=()=>tryck(true); $('#molnSynka').onclick=()=>harToken()?synka():tryck(false); $('#molnLoggaUt').onclick=loggaUt;
+    if(molnAnsluten()&&navigator.onLine) laddaGis().catch(()=>{}); } // förladda så att trycket kan öppna popupen direkt
+  $('#delaKnapp').onclick=delaExport; $('#hamtaFilKnapp').onclick=()=>$('#importFil').click();
+  ritaStatus(); vy()._upd=null;
+}
+async function delaExport(){
+  const namn=`min-hangar-${new Date().toISOString().slice(0,10)}.json`;
+  const fil=new File([exportBlob()],namn,{type:'application/json'});
+  if(navigator.canShare&&navigator.share&&navigator.canShare({files:[fil]})){
+    try{ await navigator.share({files:[fil],title:'Min Hangar – säkerhetskopia'}); toast('Säkerhetskopian delades.'); }
+    catch(e){ if(e&&e.name!=='AbortError'){ exportera(true); toast('Delning misslyckades – filen laddades ner i stället.'); } }
+  } else exportera();
+}
+
 // ---------- Export / import ----------
-function exportera(){
-  const data={app:APP,version:VERSION,exporterad:new Date().toISOString(),poster};
-  const b=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+function exportBlob(){ return new Blob([JSON.stringify({app:APP,version:VERSION,exporterad:new Date().toISOString(),poster},null,2)],{type:'application/json'}); }
+function exportera(tyst){
+  const b=exportBlob();
   const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`min-hangar-${new Date().toISOString().slice(0,10)}.json`;
-  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); toast(`Exporterade ${antal(poster.length)}.`);
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); if(!tyst) toast(`Exporterade ${antal(poster.length)}.`);
 }
 // Version 1-fält → version 2. [målfält eller null, etikett]. Allt som inte kan mappas hamnar i anteckningen.
 const V1KARTA={
@@ -337,15 +549,15 @@ function migreraV1(r,upptagna){
   p[notFalt]=delar.filter(Boolean).join('\n\n').slice(0,10000);
   return {post:p,flyttade:noter.length};
 }
-function validera(data){
+function validera(data,opt={}){
   if(!data||typeof data!=='object'||Array.isArray(data)) throw new Error('Filen är ingen export från Min Hangar.');
   if(data.app!==APP) throw new Error('Filen kommer inte från Min Hangar.');
   if(!Number.isInteger(data.version)||data.version<1) throw new Error('Filen saknar giltigt versionsnummer.');
   if(data.version>VERSION) throw new Error(`Filen har version ${data.version}, men appen stöder bara upp till version ${VERSION}. Uppdatera appen först.`);
   if(!Array.isArray(data.poster)) throw new Error('Fältet "poster" saknas.');
   if(data.poster.length>20000) throw new Error('För många poster.');
-  const sedda=new Set(); let dubbletter=0, v1flyttade=0; const ut=[];
-  data.poster.forEach((r0,i)=>{
+  const sedda=new Set(); let dubbletter=0, v1flyttade=0; const ut=[], hoppade=[];
+  data.poster.forEach((r0,i)=>{ const ra=r0; try{
     if(!r0||typeof r0!=='object'||Array.isArray(r0)) throw new Error(`Post ${i+1} är ogiltig.`);
     if(data.version===1){ const m=migreraV1(r0); v1flyttade+=m.flyttade; r0=m.post; } const r=r0; const def=TYPER[r.kat];
     if(!def) throw new Error(`Post ${i+1}: okänd kategori "${String(r.kat).slice(0,40)}".`);
@@ -357,26 +569,33 @@ function validera(data){
       p.laddningar=h.map((x,j)=>{ if(!x||!/^\d{4}-\d{2}-\d{2}$/.test(x.datum)) throw new Error(`Post ${i+1}: laddning ${j+1} har ogiltigt datum.`);
         const c=Number(x.cykler); if(!Number.isInteger(c)||c<0||c>10000) throw new Error(`Post ${i+1}: laddning ${j+1} har ogiltigt antal cykler.`); return {datum:x.datum,cykler:c}; }); }
     if(p.kat==='firmware'&&p.produkt&&p.radiosandare) throw new Error(`Post ${i+1}: välj antingen produkt eller radiosändare, inte båda.`);
+    if(r._f&&typeof r._f==='object'){ p._f={}; for(const k of faltNycklar(p.kat)){ const st=rensaStampel(r._f[k]); if(st) p._f[k]=st; } }
     ut.push(p);
-  });
-  return {lista:ut,dubbletter,v1flyttade};
+    }catch(e){ if(opt.hoppa) hoppade.push(ra); else throw e; } });
+  return {lista:ut,dubbletter,v1flyttade,hoppade};
 }
 async function importera(fil){
   try{
     if(fil.size>20*1024*1024) throw new Error('Filen är för stor.');
     let data; try{ data=JSON.parse(await fil.text()); }catch(_){ throw new Error('Filen är inte giltig JSON.'); }
     const {lista,dubbletter,v1flyttade}=validera(data);
-    const befintliga=new Set(poster.map(p=>p.id)); const uppd=lista.filter(p=>befintliga.has(p.id)).length;
+    const rader=await allaRader(); const R=new Map(rader.map(r=>[r.id,r]));
+    // R2: postens egna versioner/andrad behålls. Slå ihop använder samma fältvisa sammanslagning som molnsynken.
+    let nya=0, uppd=0, ofor=0; const ihop=[];
+    for(const p of lista){ const l=R.get(p.id); const v=l?slaIhopPost(l,p):p; if(!l||l.kat==='_raderad'&&v.kat!=='_raderad') nya++; else if(kanon(v)!==kanon(l)) uppd++; else ofor++; if(!l||kanon(v)!==kanon(l)) ihop.push(v); }
     let varning='';
-    if(!lista.length) varning=`<p class="varning"><b>Varning:</b> Filen innehåller inga poster. Väljer du Ersätt raderas alla ${antal(poster.length)} du har nu.</p>`;
-    else if(poster.length&&lista.length<poster.length) varning=`<p class="varning"><b>Varning:</b> Filen innehåller färre poster (${lista.length}) än du har nu (${poster.length}). Väljer du Ersätt försvinner resten.</p>`;
+    if(!lista.length) varning=`<p class="varning"><b>Varning:</b> Filen innehåller inga poster. Väljer du Ersätt raderas alla ${antal(poster.length)} du har på den här enheten.</p>`;
+    else if(poster.length&&lista.length<poster.length) varning=`<p class="varning"><b>Varning:</b> Filen innehåller färre poster (${lista.length}) än du har nu (${poster.length}). Väljer du Ersätt försvinner resten från den här enheten.</p>`;
+    if(molnAnsluten()) varning+=`<p class="varning"><b>Molnsynk är på.</b> Ersätt gäller bara den här enheten: poster som finns i molnet men inte i filen, och nyare ändringar från andra enheter, kommer tillbaka vid nästa synk. Inget raderas i molnet. Vill du börja om helt, logga ut från Google Drive först.</p>`;
     const text=`<p>Filen innehåller ${antal(lista.length)}${dubbletter?` (${dubbletter} dubbletter i filen hoppas över)`:''}. Du har ${antal(poster.length)} nu.</p>${varning}
-      <ul><li><b>Ersätt</b>: radera allt och spara filens innehåll.</li><li><b>Slå ihop</b>: lägg till nya poster${uppd?` och skriv över ${antal(uppd)} med samma id`:''}.</li><li><b>Avbryt</b>: ändra ingenting.</li></ul>`;
+      <ul><li><b>Ersätt</b>: radera allt på den här enheten och spara filens innehåll.</li><li><b>Slå ihop</b>: ${nya} nya, ${uppd} uppdateras, ${ofor} oförändrade. Nyare ändringar du redan har behålls.</li><li><b>Avbryt</b>: ändra ingenting.</li></ul>`;
     const svar=await fraga({titel:'Importera JSON',text,knappar:[{t:'Avbryt',v:'avbryt',klass:'ghost'},{t:'Slå ihop',v:'ihop'},{t:'Ersätt',v:'ersatt',klass:'danger'}]});
     if(svar==='avbryt'){ toast('Importen avbröts. Inget ändrades.'); return; }
-    await tx(s=>{ if(svar==='ersatt') s.clear(); lista.forEach(p=>s.put(p)); }); // en enda atomisk transaktion
+    if(svar==='ersatt') await sparaKopia('fore-import',rader);
+    await tx(s=>{ if(svar==='ersatt'){ s.clear(); lista.forEach(p=>s.put(p)); } else ihop.forEach(p=>s.put(p)); }); // en enda atomisk transaktion
+    lista.forEach(p=>seStampel(maxStampel(p))); markeraAndring();
     await ladda(); render();
-    toast(svar==='ersatt'?`Ersatte all data med ${antal(lista.length)}.`:`Sammanslagning klar: ${lista.length-uppd} nya, ${uppd} uppdaterade${dubbletter?`, ${dubbletter} dubbletter hoppades över`:''}.`+(v1flyttade?` ${v1flyttade} fält från version 1 lades i anteckningarna.`:''));
+    toast((svar==='ersatt'?`Ersatte all data med ${antal(lista.length)}.`:`Sammanslagning klar: ${nya} nya, ${uppd} uppdaterade, ${ofor} oförändrade${dubbletter?`, ${dubbletter} dubbletter hoppades över`:''}.`)+(v1flyttade?` ${v1flyttade} fält från version 1 lades i anteckningarna.`:''));
   }catch(e){ toast('Importen misslyckades: '+e.message); }
 }
 
@@ -402,11 +621,13 @@ $('#importKnapp').onclick=()=>$('#importFil').click();
 $('#importFil').onchange=e=>{ const f=e.target.files[0]; if(f) importera(f); e.target.value=''; };
 function fokusVy(){ const h=vy().querySelector('h1'); const m=h||vy(); if(h) h.setAttribute('tabindex','-1'); m.focus({preventScroll:true}); }
 window.addEventListener('hashchange',()=>{ render(); window.scrollTo(0,0); fokusVy(); });
-ladda().then(()=>{ render(); if(migreringsInfo) toast(`Dina ${antal(migreringsInfo.antal)} uppgraderades till den nya versionen${migreringsInfo.flyttade?` (${migreringsInfo.flyttade} fält lades i anteckningarna)`:''}. En säkerhetskopia sparades.`); }).catch(e=>{ vy().innerHTML='<p class="panel">Kunde inte öppna den lokala databasen: '+esc(e.message)+'</p>'; });
+vy().innerHTML='<section class="panel" role="status"><p>Öppnar databasen …</p></section>';
+let dbKlar=false; setTimeout(()=>{ if(!dbKlar) visaBlockerad('Uppgraderingen väntar','Databasen har inte kunnat öppnas ännu. Troligen är Min Hangar öppen i en annan flik eller ett hemskärmsfönster med en äldre version. Stäng de andra flikarna med Min Hangar, så fortsätter appen automatiskt. Ingen data går förlorad.'); },1500);
+ladda().then(()=>{ dbKlar=true; render(); startaMoln(); if(migreringsInfo) toast(`Dina ${antal(migreringsInfo.antal)} uppgraderades till den nya versionen${migreringsInfo.flyttade?` (${migreringsInfo.flyttade} fält lades i anteckningarna)`:''}. En säkerhetskopia sparades.`); }).catch(e=>{ vy().innerHTML='<p class="panel">Kunde inte öppna den lokala databasen: '+esc(e.message)+'</p>'; });
 if('serviceWorker' in navigator&&location.protocol!=='file:'){
   navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).catch(()=>{});
   let hadCtrl=!!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{ if(hadCtrl) toast('En ny version är installerad. Ladda om sidan för att använda den.'); hadCtrl=true; });
 }
-window.__minHangar={TYPER,KATEGORIER,APPVER,migreraV1};
+window.__minHangar=Object.freeze({TYPER,KATEGORIER,APPVER}); // bara statisk information, inga tokens eller funktioner
 })();

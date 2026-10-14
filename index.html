@@ -2,24 +2,30 @@
 <html lang="sv">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/; connect-src 'self' https://www.googleapis.com https://oauth2.googleapis.com https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; img-src 'self' data: blob:; font-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>FreeStyle Swede – Min Hangar</title>
 <meta name="description" content="Håll koll på din RC-utrustning – fungerar offline.">
-<meta name="app-version" content="3">
-<meta name="theme-color" content="#0f1720">
+<meta name="app-version" content="9">
+<meta name="theme-color" content="#0b1a2e">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="styles.css?v=3">
-<script>try{var t=localStorage.getItem('mh-tema');if(t)document.documentElement.dataset.theme=t;}catch(e){}</script>
+<link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Min Hangar">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="stylesheet" href="styles.css?v=9">
+<script src="tema.js?v=9"></script>
 </head>
 <body>
 <a class="hoppa" href="#vy">Hoppa till innehållet</a>
 <header class="topbar">
-  <a href="#/" class="brand"><img src="icons/logo-header.png" alt="FreeStyle Swede logotyp" width="90" height="56"><span class="brandtext">FreeStyle Swede – <span>Min Hangar</span></span></a>
+  <a href="#/" class="brand"><img src="icons/logo-header.png" srcset="icons/logo-header.png 1x, icons/logo-header@2x.png 2x" alt="FreeStyle Swede logotyp" width="72" height="44"><span class="brandtext">FreeStyle Swede – <span>Min Hangar</span></span></a>
   <nav class="huvudmeny" aria-label="Huvudmeny">
     <a href="#/">Min Hangar</a>
     <a href="#/flygmodeller">Flygmodeller</a>
+    <a href="#/molnlagring">Molnlagring</a>
     <a class="yt" href="https://www.youtube.com/@freeztyleswede" target="_blank" rel="noopener noreferrer" aria-label="Öppna FreeZtyle Swede på YouTube i en ny flik"><svg aria-hidden="true" viewBox="0 0 24 17" width="24" height="17"><rect width="24" height="17" rx="4" fill="#FF0033"/><path d="m10 4.7 6 3.8-6 3.8z" fill="#fff"/></svg><span>FreeZtyle Swede</span></a>
     <button class="temaknapp" id="temaKnapp" type="button" aria-pressed="false" aria-label="Mörkt läge">🌓</button>
   </nav>
@@ -29,11 +35,12 @@
   <button class="btn ghost" id="exportKnapp" type="button">Exportera JSON</button>
   <button class="btn ghost" id="importKnapp" type="button">Importera JSON</button>
   <input id="importFil" type="file" accept="application/json,.json" hidden tabindex="-1">
-  <p class="muted">Ingen inloggning – data sparas endast lokalt i den här webbläsaren. Exportera regelbundet som säkerhetskopia.</p>
+  <p id="synkrad" class="synkrad" hidden>Molnsynk: <a href="#/molnlagring" data-synkstatus></a> · <span data-synksenast></span></p>
+  <p class="muted">Data sparas lokalt i den här webbläsaren. Under Molnlagring kan du synka via Google Drive eller spara en kopia i Filer och iCloud Drive.</p>
 </footer>
 <dialog id="dlg" aria-labelledby="dlgTitel"><h2 id="dlgTitel"></h2><form id="postForm" class="postform" novalidate></form></dialog>
 <dialog id="fraga" aria-labelledby="fragaTitel" aria-describedby="fragaText"><h2 id="fragaTitel"></h2><div id="fragaText"></div><div class="rad dlgknappar" id="fragaKnappar"></div></dialog>
 <div id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=3"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
