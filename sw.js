@@ -4,7 +4,7 @@
 // - CSS/JS är versionerade (?v=N) och serveras cache-först med exakt URL-matchning: en ny index.html
 //   pekar alltid på sina egna filer, så gamla och nya filer kan inte blandas.
 // - Sidladdning går nät-först (no-cache) med cachad index.html som reserv offline.
-const VERSION='9';
+const VERSION='10';
 const CACHE='min-hangar-v'+VERSION;
 const FILER=['./','index.html','styles.css?v='+VERSION,'app.js?v='+VERSION,'tema.js?v='+VERSION,'icons/icon-192-maskable.png','icons/icon-512-maskable.png','manifest.webmanifest','icons/logo-header.png','icons/logo-header@2x.png','icons/icon-180.png','icons/icon-192.png','icons/icon-512.png'];
 self.addEventListener('install',e=>{ e.waitUntil(caches.open(CACHE).then(c=>Promise.all(FILER.map(async u=>{

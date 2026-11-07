@@ -1,6 +1,6 @@
 'use strict';
 (function(){
-const APP='min-hangar', VERSION=2, APPVER='9';
+const APP='min-hangar', VERSION=2, APPVER='10';
 // ---------- Fältdefinitioner (följer originalets lib/equipment-categories.ts, lib/aircraft-fields.ts och formulärkomponenterna) ----------
 const AIRCRAFT_TYPES=['3D-flygplan','Segelflygplan','Skala','Warbird','Trainer','Jet','Övrigt'];
 const PROPULSION=['El','Bränsle','Turbin','Övrigt'];
